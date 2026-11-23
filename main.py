@@ -1,6 +1,6 @@
-"NiceGUI-based interface to library data."
+"NiceGUI-based viewer and editor for reflib data in path given by REFLIB_DIR env var."
 
-__version__ = "0.6.4"
+__version__ = "0.7.0"
 
 import calendar
 import datetime
@@ -38,7 +38,7 @@ MONTHS.update(
 )
 
 
-starlette.formparsers.MultiPartParser.spool_max_size = 1024 * 1024 * 32  # 32 MB
+starlette.formparsers.MultiPartParser.spool_max_size = 1024 * 1024 * 64  # 64 MB
 
 
 def normalize(s):
@@ -50,10 +50,13 @@ def normalize(s):
     return result.casefold()
 
 
-class Library:
+class RefLib:
+    "Interface to the reflib data."
 
     def __init__(self):
-        self.root_dir = pathlib.Path(os.environ["LIBRARY_DIR"])
+        self.root_dir = pathlib.Path(os.environ["REFLIB_DIR"])
+        assert self.root_dir.exists()
+        assert self.root_dir.is_dir()
         self.trash_dir = self.root_dir / "trash"
         self.items = {}  # Key: identifier (normalized reference), value: instance.
         self.configfilepath = self.root_dir / "config.yaml"
@@ -65,10 +68,10 @@ class Library:
     def __getitem__(self, reference):
         return self.items[normalize(reference)]
 
-    def read(self, filepath=os.environ["LIBRARY_DIR"]):
-        "Read all items in the library data directory."
+    def read(self):
+        "Read all items in the reflib data directory."
         self.items.clear()
-        for filename in pathlib.Path(filepath).glob("*.md"):
+        for filename in self.root_dir.glob("*.md"):
             content = pathlib.Path(filename).read_text()
             m = FRONTMATTER.match(content)
             if not m:
@@ -125,7 +128,7 @@ class Library:
 
     def parse_bibtex(self, text):
         """Parse the items in the BibTex source text.
-        Add to the library.
+        Add to the reflib.
         If single item, redirect to its page.
         If multiple items, redirect to the home page, where the most recent
         items will be shown.
@@ -140,7 +143,7 @@ class Library:
                 case _:
                     raise ValueError(f"cannot handle BibTex type '{entry.entry_type}'")
             item.from_bibtex(dict([(f.key, f.value) for f in entry.fields]))
-            # Set the reference, which adds it to the library.
+            # Set the reference, which adds it to the reflib.
             if item.authors:
                 author = item.authors[0]
             else:
@@ -169,7 +172,7 @@ class Library:
             )
             self.tags_filter = (
                 ui.select(
-                    library.tags,
+                    reflib.tags,
                     label="Tags",
                     multiple=True,
                     value=tags,
@@ -280,7 +283,7 @@ class Library:
                 ui.link("Link").props(":href=props.row.url :innerHTML=props.value")
         with ui.row():
             ui.label(
-                f"Showing {len(items)} of {found}. A total of {len(library.items)} in library"
+                f"Showing {len(items)} of {found}. A total of {len(reflib.items)} in reflib"
             )
 
 
@@ -300,7 +303,7 @@ class Item:
 
     @reference.setter
     def reference(self, new):
-        global library
+        global reflib
         # Generate the reference, if not already defined.
         if not new:
             if self.reference:
@@ -312,28 +315,28 @@ class Item:
             base_reference = f"{author.split(',')[0]} {self.year}"
             letters = list(string.ascii_lowercase)
             # Is there already an 'a'-suffix reference? Then try other suffixes.
-            if (base_reference + letters[0]) in library:
+            if (base_reference + letters[0]) in reflib:
                 letters.pop(0)  # Get rid of 'a', since already tested.
                 new = base_reference + letters.pop(0)
             # Otherwise try first without suffix.
             else:
                 new = base_reference
             # Find unique reference looping over suffix letters.
-            while new in library:
+            while new in reflib:
                 new = base_reference + letters.pop(0)
         # No change.
         elif new == self.reference:
             return
         # Change reference for this item.
         else:
-            if new in library:
-                raise ValueError("reference already exists in library")
+            if new in reflib:
+                raise ValueError("reference already exists in reflib")
             if self.identifier:
-                library.items.pop(self.identifier)
-                self.filepath.move_into(library.trash_dir)
+                reflib.items.pop(self.identifier)
+                self.filepath.move_into(reflib.trash_dir)
         # Attached files do not need to be renamed.
         self.frontmatter["reference"] = new
-        library.items[self.identifier] = self
+        reflib.items[self.identifier] = self
 
     @property
     def identifier(self):
@@ -345,7 +348,7 @@ class Item:
 
     @property
     def filepath(self):
-        return library.root_dir / self.filename
+        return reflib.root_dir / self.filename
 
     @property
     def modified(self):
@@ -457,32 +460,32 @@ class Item:
 
     @cites.setter
     def cites(self, value):
-        global library
+        global reflib
         if isinstance(value, str):
             value = value.split("\n")
         elif not isinstance(value, list):
             raise ValueError
-        value = [v.strip() for v in value if v in library]
+        value = [v.strip() for v in value if v in reflib]
         if value := [v for v in value if v]:
             self.frontmatter["cites"] = value
         else:
             self.frontmatter.pop("cites", None)
 
     def cites_items(self):
-        global library
+        global reflib
         result = []
         for reference in self.cites:
             try:
-                result.append(library[reference])
+                result.append(reflib[reference])
             except KeyError:
                 pass
         return result
 
     def cited_by_items(self):
-        global library
+        global reflib
         reference = self.reference
         result = []
-        for item in library.items.values():
+        for item in reflib.items.values():
             if reference in item.cites:
                 result.append(item)
         return result
@@ -493,28 +496,28 @@ class Item:
 
     @see_also.setter
     def see_also(self, value):
-        global library
+        global reflib
         if isinstance(value, str):
             value = value.split("\n")
         elif not isinstance(value, list):
             raise ValueError
         value = [v.strip() for v in value]
-        if value := [v for v in value if v in library]:
+        if value := [v for v in value if v in reflib]:
             self.frontmatter["see_also"] = value
         else:
             self.frontmatter.pop("see_also", None)
 
     def see_also_items(self):
         "Includes the reverse items."
-        global library
+        global reflib
         result = []
         for reference in self.see_also:
             try:
-                result.append(library[reference])
+                result.append(reflib[reference])
             except KeyError:
                 pass
         reference = self.reference
-        for item in library.items.values():
+        for item in reflib.items.values():
             if reference in item.see_also:
                 result.append(item)
         return result
@@ -632,9 +635,7 @@ class Item:
                         label="Reference", value=self.reference
                     )
                 self.tags_field = (
-                    ui.select(
-                        library.tags, label="Tags", multiple=True, value=self.tags
-                    )
+                    ui.select(reflib.tags, label="Tags", multiple=True, value=self.tags)
                     .classes("w-140")
                     .props("use-chips")
                 )
@@ -691,7 +692,7 @@ class Item:
                         ui.label(file["name"])
 
     async def add_file(self, e):
-        global library
+        global reflib
         content = await e.file.read()
         suffix = mimetypes.guess_extension(e.file.content_type) or ".bin"
         if suffix == ".md":
@@ -699,13 +700,13 @@ class Item:
         stem = pathlib.Path(e.file.name).stem
         filename = f"{stem}{suffix}"
         number = 0
-        while (library.root_dir / filename).exists():
+        while (reflib.root_dir / filename).exists():
             number += 1
             filename = f"{stem}_{number}{suffix}"
         self.frontmatter.setdefault("files", []).append(
             dict(name=filename, date=str(datetime.date.today()))
         )
-        (library.root_dir / filename).write_bytes(content)
+        (reflib.root_dir / filename).write_bytes(content)
         self.write()
         self.edit_files.refresh()
 
@@ -744,18 +745,18 @@ class Item:
 
     def save_files(self):
         "Misnomer; only deletes marked files."
-        global library
+        global reflib
         for filename, field in self._delete_file_fields.items():
             if field.value:
                 for pos, file in enumerate(self.files):
                     if file["name"] == filename:
                         self.frontmatter["files"].pop(pos)
                         break
-                (library.root_dir / filename).unlink()
+                (reflib.root_dir / filename).unlink()
 
     def write(self):
         if self.filepath.exists():
-            self.filepath.move_into(library.trash_dir)
+            self.filepath.move_into(reflib.trash_dir)
         with self.filepath.open(mode="w", encoding="utf-8") as outfile:
             outfile.write("---\n")
             outfile.write(yaml.safe_dump(self.frontmatter, allow_unicode=True))
@@ -775,11 +776,11 @@ class Item:
             )
 
     def delete(self):
-        global library
-        library.items.pop(self.identifier)
+        global reflib
+        reflib.items.pop(self.identifier)
         for file in self.files:
-            (library.root_dir / file["name"]).move_into(library.trash_dir)
-        self.filepath.move_into(library.trash_dir)
+            (reflib.root_dir / file["name"]).move_into(reflib.trash_dir)
+        self.filepath.move_into(reflib.trash_dir)
         ui.navigate.to("/")
 
 
@@ -1095,7 +1096,7 @@ class Post(Item):
         self.set_key_value("retrieved", value)
 
     def view_links(self):
-        global library
+        global reflib
         super().view_links()
         ui.button(icon="content_copy").props("flat").on(
             "click",
@@ -1111,26 +1112,26 @@ class Post(Item):
         self.href = self.href_field.value
 
     def delete(self):
-        global library
+        global reflib
         try:
-            filepath = library.root_dir / self.frontmatter["file"]
+            filepath = reflib.root_dir / self.frontmatter["file"]
         except KeyError:
             pass
         else:
-            filepath.move_into(library.trash_dir)
+            filepath.move_into(reflib.trash_dir)
         super().delete()
 
 
-library = Library()
-library.read()
+reflib = RefLib()
+reflib.read()
 
 
 @ui.page("/")
 def main(author: str = ""):
-    global library
+    global reflib
     with ui.header().classes(f"text-h5"):
         ui.link("📚", "/").style("text-decoration: none;")
-        ui.label(f"Library v{__version__}")
+        ui.label(f"reflib v{__version__}")
         ui.button(
             "Add BibTex", color="secondary", on_click=lambda: ui.navigate.to("/bibtex")
         ).props("no-caps")
@@ -1148,39 +1149,39 @@ def main(author: str = ""):
         ui.button("Tags", color="info", on_click=lambda: ui.navigate.to("/tags")).props(
             "no-caps"
         )
-    library.table_setup(author=author)
+    reflib.table_setup(author=author)
 
 
 @ui.page("/view/{identifier}")
 def view_item_page(identifier: str):
-    global library
-    item = library[identifier]
+    global reflib
+    item = reflib[identifier]
     item.view()
 
 
 @ui.page("/edit/{identifier}")
 def edit_item_page(identifier: str):
-    global library
-    item = library[identifier]
+    global reflib
+    item = reflib[identifier]
     item.edit()
 
 
 @ui.page("/delete/{identifier}")
 def delete_item_page(identifier: str):
-    global library
-    item = library[identifier]
+    global reflib
+    item = reflib[identifier]
     item.confirm_delete()
 
 
 @ui.page("/bibtex")
 def add_bibtex():
-    global library
+    global reflib
     with ui.header().classes(f"text-h5"):
         ui.link("📚", "/").style("text-decoration: none;")
         ui.label(f"Add bibtex")
     textarea = ui.textarea(label="BibTex source").classes("w-100")
     with ui.row():
-        ui.button("Parse", on_click=lambda: library.parse_bibtex(textarea.value)).props(
+        ui.button("Parse", on_click=lambda: reflib.parse_bibtex(textarea.value)).props(
             "no-caps"
         )
         ui.button(
@@ -1205,11 +1206,11 @@ def add_book_page():
 
 @ui.page("/tags")
 def tags_page():
-    global library
+    global reflib
 
     def add_tag(tag):
-        library.add_tag(tag)
-        library.write_tags()
+        reflib.add_tag(tag)
+        reflib.write_tags()
         ui.navigate.to("/tags")
 
     with ui.header().classes(f"text-h5"):
@@ -1221,10 +1222,8 @@ def tags_page():
             dict(name="number", label="# items", field="number", align="right"),
         ],
         rows=[
-            dict(
-                tag=t, number=library.count_tagged_items(t), url=f"/tag/{normalize(t)}"
-            )
-            for t in library.tags
+            dict(tag=t, number=reflib.count_tagged_items(t), url=f"/tag/{normalize(t)}")
+            for t in reflib.tags
         ],
         row_key="name",
     ).props("bordered").on("row-click", lambda e: ui.navigate.to(e.args[1]["url"]))
@@ -1235,15 +1234,15 @@ def tags_page():
 
 @ui.page("/tag/{tag}")
 def tag_page(tag: str):
-    global library
-    tag = library.get_tag(normalize(tag))
+    global reflib
+    tag = reflib.get_tag(normalize(tag))
     if tag is None:
         ui.navigate.to("/tags")
     else:
         with ui.header().classes(f"text-h5"):
             ui.link("📚", "/").style("text-decoration: none;")
             ui.label(f"Tag '{tag}'")
-        library.table_setup(tags=[tag])
+        reflib.table_setup(tags=[tag])
         with ui.row():
             ui.button(
                 "Delete", on_click=lambda: ui.navigate.to(f"/tag/{tag}/delete")
@@ -1255,10 +1254,10 @@ def tag_page(tag: str):
 
 @ui.page("/tag/{tag}/delete")
 def tag_delete_page(tag: str):
-    global library
+    global reflib
 
     def do_delete():
-        library.delete_tag(tag)
+        reflib.delete_tag(tag)
         ui.navigate.to("/tags")
 
     with ui.header().classes(f"text-h5"):
@@ -1274,8 +1273,8 @@ def tag_delete_page(tag: str):
 
 @app.get("/file/{filename}")
 def file(filename: str):
-    global library
-    return FileResponse(library.root_dir / filename)
+    global reflib
+    return FileResponse(reflib.root_dir / filename)
 
 
-ui.run(title="Library", favicon="📚")
+ui.run(title="reflib", favicon="📚")
